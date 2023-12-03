@@ -1,0 +1,161 @@
+---
+title: "Run MOMAM"
+author: "Michael Wiley"
+date: "2023-12-03"
+output: pdf_document
+---
+
+```{r libraries, echo = FALSE, message = FALSE, warning = FALSE}
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(readr)
+library(httr)
+library(jsonlite)
+library(RSQLite)
+library(tidyr)
+library(data.table)
+library(purrr)
+library(stringi)
+library(stringr)
+library(lubridate)
+library(here)
+```
+
+Load all helper functions located in `lib`.
+```{r load_helper_functions, echo = FALSE, message = FALSE, warning = FALSE}
+source_files <- list.files(here("lib")) %>%
+  str_subset("\\.R$") %>%
+  str_c(here("lib"), "/", .)
+
+lapply(source_files, source)
+```
+Various global environment variable setup:
+
+Establish database connection
+Load all csv files
+Creates tables name
+Loads API information
+```{r gloabl_var_setup}
+db <- connect_db(here("output"), "MOMAM.sqlite")
+csvs <- load_all_csvs_from_folder(here("data/channel_data/"))
+
+tablenames <- str_c(tolower(str_extract(csvs, "(pie|Spike)")),
+                    str_extract(csvs, "20[:number:]+"))
+
+
+# End points with necessary information from the API.
+# TO DO: Organize this into a single data structure.
+api_url <- "https://api.igdb.com/v4"
+end_games <- "/games"
+end_categories <- "/categories"
+end_genres <- "/genres"
+end_age <- "/age_ratings"
+end_company <- "/involved_companies"
+end_engines <- "/game_engines"
+end_platforms <- "/platforms"
+end_franchises <- "/franchises"
+end_themes <- "/themes"
+end_keywords <- "/keywords"
+end_perspectives <- "/player_perspectives"
+
+client_id <- get_client_id()
+access_token <- get_access_token()
+
+```
+
+- Loads in the annual play time data for each game each streamer has played each year
+- Searches the game in vgdb to obtain the game's id number to use to later obtain metadata on each game
+- Writes the data to the database.
+
+- Please refer to the functions in `lib/twitch_game_and_channel_data` for further documenation.
+**WARNING: This cell can take ~10 minutes to run.**
+
+One *only* needs to run this cell if trying to reproduce `output/MOMAM.sqlite` from scratch.
+Running it with an existing `MOMAM.sqlite` files with no new csvs in `data/channel_data/` will
+attempt to merge the exact same data into the same tables in the db but end up doing nothing because
+the data already exists.
+
+*In other words* if this cell is taking too long to run, simply skip it and everything else
+will run fine provided the above paragraph is true.
+```{r process_csvs}
+lapply(csvs, function(csv) {
+  construct_yearly_time(db, csv)
+})
+
+dbExecute(db, "DROP VIEW IF EXISTS cumulative_playtime;")
+dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_playtime AS
+           SELECT streamer, game_id, SUM(minutes) AS minutes
+           FROM yearly_playtime
+           GROUP BY streamer, game_id;")
+```
+
+```{r db_check}
+dbGetQuery(db, "SELECT * FROM cumulative_playtime;")
+```
+
+The csv files contained data on every game the two streamers have played between 2016 and 2022
+and we took all of those games, and added an entry in our database for them.
+
+However, what about games they haven't played? Every year MOMAM features games that neither
+participant has played before and is thus not in the csvs with their past data.
+
+The below manually adds entries for games that will be played in an upcoming MOMAM
+so that their metadata can be collected as well.
+```{r manual_additions}
+manual_db_additions(db)
+```
+
+The following function will:
+1) Take every game pie and spike have ever streamed and construct a query that
+will grab any potentially useful meta data from that query
+2) Send the query to the API
+3) Parse and normalize the result of the query
+4) Write the query to the MOMAM database.
+
+Please view `lib/get_game_metadata.R` for more detailed documentation.
+
+```{r collect_metadata}
+games_run_query(db)
+```
+
+Creates aggregate views of the data in order to know how much time each streamer has spent
+playing games with a certain piece of metadata.
+
+- `imputed_yearly_metadata` is an intermediary table used to remove null values when calculating
+play time for the next two view
+- `yearly_metadata_playtime` lists how long each streamer spent playing games with particular
+metadata each year.
+- `cumulative_metadata_playtime` lists how long each streamer played games with particular metadata
+throughout their streaming career.
+
+The yearly data is actually very important. Imagine if streamer A has 100 total hours on games in the
+`action` genre, but 95 of those hours were in 2022. Since our model will be learning from past MOMAMs
+that have been happening since 2016, it's important to have the context of what their experience with the
+genre was *at the time* and not necessarily what their current, cumulative experience with it is.
+```{r create_views}
+# I wish SQLite had 'CREATE OR REPLACE' statements.
+dbExecute(db, "DROP VIEW IF EXISTS imputed_yearly_metadata;")
+dbExecute(db, "DROP VIEW IF EXISTS yearly_metadata_playtime;")
+dbExecute(db, "DROP VIEW IF EXISTS cumulative_metadata_playtime;")
+
+# Some games don't have a release date or rating in vgdb, so this view imputes one from the average.
+dbExecute(db, "CREATE VIEW IF NOT EXISTS imputed_yearly_metadata AS
+            SELECT id, name,
+            ROUND(COALESCE(value, AVG(value) OVER(PARTITION BY name)), 0) value
+            FROM games_metadata")
+
+
+dbExecute(db, "CREATE VIEW IF NOT EXISTS yearly_metadata_playtime AS
+           SELECT y.streamer, y.year, g.name, g.value, SUM(y.minutes) minutes
+           FROM yearly_playtime y
+           LEFT JOIN imputed_yearly_metadata g ON y.game_id = g.id
+           GROUP BY y.streamer, y.year, g.name, g.value")
+
+
+dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_metadata_playtime AS
+           SELECT streamer, name, value, SUM(minutes) minutes
+           FROM yearly_metadata_playtime
+           GROUP BY streamer, name, value;")
+```
+
