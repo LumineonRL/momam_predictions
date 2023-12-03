@@ -1,0 +1,18 @@
+Identical Models:
+	
+Multi-Layer Perceptron with Weight Decay, Multi-Layer Perceptron with Weight Decay and multiple layers
+
+
+Conditional Inference Tree, Conditional Inference Tree 2 with Random Hyperparameter Search, CART
+
+C4.5-like Trees, Conditional Inference Tree 2, Tree Models from Genetic Algorithms
+
+Single C5.0 Tree, C5.0
+
+L2 Regularized Linear Support Vector Machines with Class Weights and L2 Regularized Support Vector Machine (dual) with Linear Kernel
+
+Factor-Based Linear Discriminant Analysis, Maximum Uncertainty Linear Discriminant Analysis, and ROC-Based Classifier
+
+DeepBoost, Single Rule Classification, Cost-Sensitive C5.0
+
+tl;dr, my 100 model ensemble is more like 91, unless these models really did happen to come up with exactly the same predictions with their different methods.
