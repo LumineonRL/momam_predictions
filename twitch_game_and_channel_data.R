@@ -16,13 +16,14 @@ library(stringi)
 library(stringr)
 library(lubridate)
 
-db <- dbConnect(SQLite(),dbname="MOMAM.sqlite")
+db <- dbConnect(SQLite(), dbname="MOMAM.sqlite")
 
 csvs <- str_c("channel_data/", list.files("channel_data"))
 tablenames <- str_c(tolower(str_extract(csvs, "(pie|Spike)")),  str_extract(csvs, "20[:number:]+"))
 
 
-#End points with necessary information from the API.
+# End points with necessary information from the API.
+# TO DO: Organize this into a single data structure.
 api_url <- "https://api.igdb.com/v4"
 end_games <- "/games"
 end_categories <- "/categories"
@@ -43,8 +44,19 @@ access_token <- get_access_token()
 #tablename is a string
 #csv is a string leading to a csv file from sullygnome.
 
-
-
+# Pokemon games with multiple versions on Twitch are listed as one game, but
+# the game database has them as individual entries.
+# For example, on Twitch, "Pokemon Red/Blue" could refer to either "Pokemon Red"
+# or "Pokemon Blue" on vgdb.
+# This function always extracts the first game in this scenario.
+pokemon_checker <- function(game) {
+  if(str_detect(game, "Pokemon") & str_detect(game, "/")) {
+    return(str_extract(game, "^[^/]+"))
+  }
+  else {
+    return(game)
+  }
+}
 
 #This is unfortunately EXTREMELY ugly since the way the URLs handle "'s" is
 #inconsistent. It's pretty much a 50/50 whether "Mario's" will turn into
@@ -174,7 +186,7 @@ dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_playtime AS
 #*
 ################################################################################
 
-past_results <- read_csv("momam7_base_data.csv")
+past_results <- read_csv("momam7/momam7_base_data.csv")
 
 games_list <- dbGetQuery(db, "SELECT DISTINCT game
            FROM game_data;")
