@@ -342,7 +342,7 @@ dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_metadata_playtime AS
            FROM yearly_metadata_playtime
            GROUP BY streamer, name, value;")
 
-
+dbDisconnect(db)
 
 
 
