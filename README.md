@@ -1,3 +1,10 @@
+## Overview
+
+**MOMAM** or **M**onth **o**f **M**ushrooms **a**nd **M**ayhem is an annual event hosted by two streamers on Amazon's popular video game streaming platform, twitch.tv. During the month of March each year, iateyourpie and SpikeVegeta will compete in different head-to-head video game challenges and races every day. Viewers will also have the opportunity to submit a list of their predictions for who will win each individual challenge, with the winner often receiving a prize. Competition tends to be fierce, as upwards of 4000 users will submit their predictions each year, making it difficult to place well.
+
+The objective of this project is to create a list of predictions for who will win each individual challenge for the upcoming year. To do that, all of the data from previous MOMAMs will be used, as well as each streamer's general play time preferences. This will be done by collecting publicly available playtime data, obtaining meta data on every game they've played via a publicly-accessible game database API, structuring the data to formalize how each streamer engages with certain genres, franchises, etc., and finally using this information to create a prediction framework that can produce a competitive set of predictions no matter what the game list for the upcoming year ends up being.
+
+
 ## Setup
 
 In order to completely reporduce the contents of this project's `output` folder from scratch, access to Twitch.tv's developer API is required.
