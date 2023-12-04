@@ -17,4 +17,4 @@ In order to completely reporduce the contents of this project's `output` folder 
       Do not worry about this - the `get_client_secret.R` R script will take of this part for you automatically.
 2. Open the `get_client_secret.R` file and paste your id and secret into the return statements of the appropriate functions.
 
-Note that if someone going through this project does not wish to go through the above setup process, they can simply ensure that they clone `MOMAM.sqlite` and and skip the `process_csvs`, `manual_additions`, and `collect_metadata` code blocks when running `doc/Run_MOMAM.Rmd`.
+Note that if someone going through this project does not wish to go through the above setup process, they can simply ensure that they clone `MOMAM.sqlite` and and skip from `Step 0: Setup` straight to `Step 2: Prepare Data for Analysis` code blocks when running `doc/Run_MOMAM.Rmd`.
