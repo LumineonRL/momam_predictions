@@ -22,6 +22,9 @@ library(stringi)
 library(stringr)
 library(lubridate)
 library(here)
+library(tidymodels)
+library(fastDummies)
+library(yardstick)
 ```
 
 Load all helper functions located in `lib`.
@@ -272,12 +275,12 @@ past_results_weighted <- past_results_pivoted %>%
 ```{r check_head}
 head(past_results_weighted)
 ```
-
+Note that this is problematic here - there are significantly more columns than rows at the moment.
 ```{r check_dim}
 dim(past_results_weighted)
 ```
 
-## Step 4: Analysis
+## Step 3: Analysis
 
 Now that the data has been created, it's time to analyze it.
 
@@ -285,7 +288,7 @@ First up, a preprocessing workflow is created.
 Since we have so many columns - many of which have near-zero variance, we will
 filter those out.
 
-```{r pre=process}
+```{r pre-process}
 past_results_weighted$winner <- as.factor(past_results_weighted$winner)
 
 data_recipe <- recipe(winner ~ ., data = past_results_weighted) %>%
@@ -308,8 +311,8 @@ The idea here is that the most recent year is the most important one to get corr
 ```{r train_test}
 # All past MOMAMs will be the training data, with the goal of predicting the most
 # recent one.
-data_train <- past_results_weighted[which(pivoted_data$MOMAM != 7), ]
-data_test <- past_results_weighted[which(pivoted_data$MOMAM == 7), ]
+data_train <- past_results_weighted[which(past_results_weighted$MOMAM != 7), ]
+data_test <- past_results_weighted[which(past_results_weighted$MOMAM == 7), ]
 ```
 
 Applies the pre-processing steps to our test and train data as defined above.
@@ -317,7 +320,7 @@ Applies the pre-processing steps to our test and train data as defined above.
 data_processed <- prep(data_recipe, training = data_train, retain = TRUE) %>%
   bake(new_data = data_test)
 
-View(data_processed)
+head(data_processed)
 ```
 
 Define models:
