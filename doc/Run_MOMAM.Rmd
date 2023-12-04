@@ -25,6 +25,8 @@ library(here)
 library(tidymodels)
 library(fastDummies)
 library(yardstick)
+library(discrim)
+library(sda)
 ```
 
 Load all helper functions located in `lib`.
@@ -225,9 +227,9 @@ desired_order <- c("winner", "MOMAM", "grouping", "game", "category", "game_id")
 # Combines the categorical and numeric dfs.
 past_results_pivoted_metadata <- past_results_categorical %>%
   left_join(past_results_numeric, by = join_by(MOMAM, grouping, game, category, game_id, winner)) %>%
-  select(sort(names(.))) %>%
-  select(all_of(desired_order), everything()) %>%
-  select(-category) # category is handled but the cumulative time function below.
+  dplyr::select(sort(names(.))) %>%
+  dplyr::select(all_of(desired_order), everything()) %>%
+  dplyr::select(-category) # category is handled but the cumulative time function below.
 ```
 
 Next is to deal with multi-game challenges. Sometimes one day will consist of a race of 2 or more games and we need to treat these days one prediction. To achieve this, each game that's played on the same day as the data in all of their columns averaged out. The comments in the code should have more detail.
@@ -246,7 +248,7 @@ counts <- past_results %>%
 past_results_pivoted <- past_results %>%
   left_join(counts, by = join_by(grouping)) %>%
   mutate(weight = 1/n) %>%
-  select(-n) %>%
+  dplyr::select(-n) %>%
   left_join(game_list, by = join_by(game)) %>%
   left_join(cumulative_playtime, by = join_by(game_id), multiple = "all", relationship = "many-to-many") %>%
   dummy_cols(select_columns = c("category"),
@@ -291,17 +293,60 @@ filter those out.
 ```{r pre-process}
 past_results_weighted$winner <- as.factor(past_results_weighted$winner)
 
-data_recipe <- recipe(winner ~ ., data = past_results_weighted) %>%
+base_recipe <- recipe(winner ~ ., data = past_results_weighted) %>%
   step_rm(grouping) %>%
+  step_mutate(cum_playtime_pie = log(cum_playtime_pie + 1)) %>%
+  step_mutate(cum_playtime_spike = log(cum_playtime_spike + 1)) %>%
+  step_naomit(c(cum_playtime_pie, cum_playtime_spike)) %>%
   step_nzv(all_predictors(), freq_cut = 0.01, unique_cut = 0) %>%
   step_zv(all_predictors()) %>%
   step_lincomb(all_numeric_predictors()) %>%
+  step_corr(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+grouped_pca <- recipe(winner ~ ., data = past_results_weighted) %>%
+  step_rm(grouping) %>%
   step_mutate(cum_playtime_pie = log(cum_playtime_pie + 1)) %>%
-  step_mutate(cum_playtime_pie= log(cum_playtime_spike + 1)) %>%
+  step_mutate(cum_playtime_spike = log(cum_playtime_spike + 1)) %>%
   step_naomit(c(cum_playtime_pie, cum_playtime_spike)) %>%
+  step_zv(all_predictors()) %>%
   step_normalize(all_predictors()) %>%
+  step_pca(starts_with("category"), threshold = 0.5, prefix = "category_") %>%
+  step_pca(starts_with("cum"), threshold = 0.8, prefix = "cum") %>%
+  step_pca(starts_with("franchises"), threshold = 0.2, prefix = "franchises") %>%
+  step_pca(starts_with("genres"), threshold = 0.9, prefix = "genres") %>%
+  step_pca(starts_with("platforms"), threshold = 0.80, prefix = "platforms") %>%
+  step_pca(starts_with("player"), threshold = 0.8, prefix = "player") %>%
+  step_pca(starts_with("themes"), threshold = 0.8, prefix = "themes") %>%
+  step_pca(starts_with("involved"), threshold = 0.2, prefix = "involved") %>%
+  step_corr(all_predictors(), threshold = 0.9)
+
+hierarchical_pca <- grouped_pca %>%
+  step_pca(-c("MOMAM", "first_release_date", "total_rating", "winner"), threshold = 0.8, prefix = "hier_")
+
+pca_recipe <- base_recipe %>%
   step_pca(all_predictors(), threshold = 0.2)
-  #step_pca(starts_with("category_"), threshold = 0.8)
+
+pca_strict_recipe <- base_recipe %>%
+  step_pca(all_predictors(), threshold = 0.8)
+
+pca_very_strict_recipe <- base_recipe %>%
+  step_pca(all_predictors(), threshold = 0.95)
+
+kpca_poly_recipe <- base_recipe %>%
+  step_kpca_poly(all_predictors(), num_comp = 10)
+
+modified_base <- recipe(winner ~ ., data = past_results_weighted) %>%
+  step_rm(grouping) %>%
+  step_mutate(cum_playtime_pie = log(cum_playtime_pie + 1)) %>%
+  step_mutate(cum_playtime_spike = log(cum_playtime_spike + 1)) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors(), freq_cut = 0.05, unique_cut = 0.01) %>%
+  step_corr(all_predictors()) %>%
+  step_lincomb(all_numeric_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+  
 ```
 
 Next for the train-test split. Rather than spliting the data randomly, it was split
@@ -317,10 +362,12 @@ data_test <- past_results_weighted[which(past_results_weighted$MOMAM == 7), ]
 
 Applies the pre-processing steps to our test and train data as defined above.
 ```{r apply_preprocessing}
-data_processed <- prep(data_recipe, training = data_train, retain = TRUE) %>%
+data_processed <- prep(hierarchical_pca, training = data_train, retain = TRUE) %>%
   bake(new_data = data_test)
 
 head(data_processed)
+
+View(data_processed)
 ```
 
 Define models:
@@ -329,39 +376,158 @@ These are the models is trained on. Currently a few simple models are here as a 
 but ideally more will be used.
 
 ```{r models}
-model_dt <- decision_tree() %>%
+model_dt <- decision_tree(tree_depth = tune(), min_n = tune(), cost_complexity = tune()) %>%
   set_engine("rpart") %>%
-  set_mode("classification")
+  set_mode("classification") %>%
+  translate()
 
 model_lr <- logistic_reg() %>%
   set_engine("glm") %>%
   set_mode("classification")
+
+model_lda <- discrim_linear() %>% 
+  set_engine("sda") %>% 
+  translate()
+
+model_linear_mda <- discrim_linear(penalty = tune()) %>%
+  set_engine("mda")
+
+model_rf <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("randomForest") %>% 
+  set_mode("classification") %>% 
+  translate()
+
+model_nb <- naive_Bayes(smoothness = tune(), Laplace = tune()) %>%
+  set_engine("naivebayes") %>% 
+  translate()
+
+model_xgb <- boost_tree(tree_depth = tune(),
+                        trees = tune(),
+                        learn_rate = tune(),
+                        mtry = tune(),
+                        min_n = tune(),
+                        loss_reduction = tune(),
+                        sample_size = tune(),
+                        stop_iter = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification") %>%
+  translate()
+
+model_c5_rules <- C5_rules(trees = tune(), min_n = tune()) %>%
+  set_engine("C5.0") %>%
+  set_mode("classification") %>%
+  translate()
+
+model_neighbor <- nearest_neighbor(neighbors = tune(), weight_func = tune(), dist_power = tune()) %>%
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+model_mlp <- mlp(
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune()
+) %>%  
+  set_engine("nnet") %>% 
+  set_mode("classification")
 ```
 
+
 ```{r workflow}
+library(agua)
+library(rules)
+
 workflow_set <- workflow_set(
-  preproc = list(simple = data_recipe),
+  preproc = list(base = base_recipe,
+                 pca = pca_recipe,
+                 strict = pca_strict_recipe,
+                 very_strict = pca_very_strict_recipe,
+                 kpca = kpca_poly_recipe,
+                 modified = modified_base,
+                 grouped_pca = grouped_pca,
+                 hierarchical_pca = hierarchical_pca),
   models = list(
     decision_tree = model_dt,
-    logistic_regression = model_lr
+    logistic_regression = model_lr,
+    discrim_linear = model_lda,
+    linear_mda = model_linear_mda,
+    rand_forest = model_rf,
+    naive_bayes = model_nb,
+    xgboost = model_xgb,
+    C5_Rules = model_c5_rules,
+    nearest_neighbor = model_neighbor,
+    mlp = model_mlp
   ),
   cross = TRUE
 )
 ```
 
 ```{r train}
-set.seed(0323)
-trained_workflow_set <- workflow_map(
-  workflow_set,
-  "fit_resamples",
-  resamples = vfold_cv(data_train),
-  metrics = metric_set(accuracy),
-  control = control_resamples(save_pred = TRUE)
+library(doParallel)
+doParallel::registerDoParallel(cores = 10)
+
+trained_workflow_set <- workflow_set %>%
+  workflow_map(
+    seed = 0323,
+    fn = "tune_grid",
+    grid = 10,
+    #"fit_resamples",
+    resamples = vfold_cv(data_train),
+    metrics = metric_set(accuracy),
+    control = control_resamples(save_pred = TRUE),
 )
+
+doParallel::stopImplicitCluster()
 ```
 
 ```{r evaluate}
-trained_workflow_set
+trained_workflow_set <- trained_workflow_set %>% dplyr::filter(lengths(result) > 1)
+```
 
-autoplot(trained_workflow_set)
+```{r}
+trained_workflow_set
+```
+
+```{r}
+trained_workflow_set %>%
+  collect_predictions() %>%
+  View()
+```
+```{r}
+trained_workflow_set %>%
+  workflowsets::rank_results(rank_metric = "accuracy") %>%
+  dplyr::select(wflow_id, mean, std_err, model, rank)
+```
+
+```{r}
+trained_workflow_set %>%
+  extract_workflow_set_result("strict_logistic_regression") %>%
+  select_best(metric = "accuracy")
+
+trained_workflow_set %>%
+  extract_workflow_set_result("hierarchical_pca_rand_forest") %>%
+  select_best(metric = "accuracy")
+```
+
+```{r}
+best_results <- trained_workflow_set %>%
+  extract_workflow_set_result("strict_logistic_regression") %>%
+  select_best(metric = "accuracy")
+
+concrete_split <- initial_split(concrete, strata = compressive_strength)
+
+test_results <- trained_workflow_set %>%
+  extract_workflow("strict_logistic_regression") %>%
+  finalize_workflow(best_results) %>%
+  last_fit(split = vfold_cv(data_test))
+
+
+trained_workflow_set %>%
+  extract_workflow("strict_logistic_regression") %>%
+  extract_fit_engine()
+
+
+
+   
+```
+
 ```
