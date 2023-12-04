@@ -1,6 +1,0 @@
-Channel stats are grabbed from sullygnome.com
-
-Values are entered manually as the site owner has requested to not scrape their site.
-
-There is only 5 months of data for 2015, which
-affects the MOMAM1 values.
