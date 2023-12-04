@@ -5,6 +5,8 @@ date: "2023-12-03"
 output: pdf_document
 ---
 
+## Step 0: Setup
+
 ```{r libraries, echo = FALSE, message = FALSE, warning = FALSE}
 library(stringr)
 library(dplyr)
@@ -63,6 +65,9 @@ client_id <- get_client_id()
 access_token <- get_access_token()
 
 ```
+
+## Step 1: Obtain Data
+
 
 - Loads in the annual play time data for each game each streamer has played each year
 - Searches the game in vgdb to obtain the game's id number to use to later obtain metadata on each game
@@ -141,7 +146,7 @@ dbExecute(db, "DROP VIEW IF EXISTS cumulative_metadata_playtime;")
 
 # Some games don't have a release date or rating in vgdb, so this view imputes one from the average.
 dbExecute(db, "CREATE VIEW IF NOT EXISTS imputed_yearly_metadata AS
-            SELECT id, name,
+            SELECT DISTINCT id, name,
             ROUND(COALESCE(value, AVG(value) OVER(PARTITION BY name)), 0) value
             FROM games_metadata")
 
@@ -158,4 +163,202 @@ dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_metadata_playtime AS
            FROM yearly_metadata_playtime
            GROUP BY streamer, name, value;")
 ```
+```{r db_disconnect}
+dbDisconnect(db)
+```
 
+
+## Step 2: Prepare Data for Analysis
+
+The above step steps collected the necessary data and placed it into normalized SQL tables
+
+Now it's time to move that data into a analysis-ready format.
+
+This cell here will connect to the database containing our game metadata, as well
+the csv file holding the results of all previous MOMAMs.
+
+game_list is our master list of games that the streamers have played
+cumulative_playtime is our list of how long each streamer spent playing each game in total
+imputed_yearly_metadata lists pertinent metadata for each game, such as genre and release data.
+
+```{r setup}
+db <- connect_db(here("output"), "MOMAM.sqlite")
+past_results <- read_csv(str_c(here("data/momam7"), "/momam7_base_data.csv"))
+
+game_list <- dbGetQuery(db, 'SELECT game_id, game FROM game_data;') %>%
+  as_tibble()
+
+cumulative_playtime <- dbGetQuery(db, 'SELECT * FROM cumulative_playtime;') %>%
+  as_tibble()
+
+imputed_yearly_metadata <- dbGetQuery(db, 'SELECT * FROM imputed_yearly_metadata') %>%
+  as_tibble()
+```
+
+The following cells will all focus around taking our db normalized data and preparing it for
+analysis. The first thing to do is create dummy variables columns for our categorical variables,
+but not our numeric ones.
+
+```{r categorical_dummies}
+past_results_with_id <- past_results %>%
+  left_join(game_list, by = join_by(game)) %>%
+  left_join(imputed_yearly_metadata, by = join_by(game_id == id), relationship = "many-to-many")
+
+past_results_categorical <- past_results_with_id %>%
+  dplyr::filter(!(name %in% c("first_release_date", "total_rating"))) %>%
+  distinct() %>%
+  pivot_wider(names_from = c(name, value), values_from = value,
+              names_glue = "{name}_{value}") %>%
+  mutate(across(-c(MOMAM, grouping, game, category, winner, game_id),
+                ~ ifelse(is.na(.), 0, 1)))
+
+past_results_numeric <- past_results_with_id %>%
+  dplyr::filter((name %in% c("first_release_date", "total_rating"))) %>%
+  distinct() %>%
+  pivot_wider(names_from = name, values_from = value, values_fn = mean)
+
+desired_order <- c("winner", "MOMAM", "grouping", "game", "category", "game_id")
+
+# Combines the categorical and numeric dfs.
+past_results_pivoted_metadata <- past_results_categorical %>%
+  left_join(past_results_numeric, by = join_by(MOMAM, grouping, game, category, game_id, winner)) %>%
+  select(sort(names(.))) %>%
+  select(all_of(desired_order), everything()) %>%
+  select(-category) # category is handled but the cumulative time function below.
+```
+
+Next is to deal with multi-game challenges. Sometimes one day will consist of a race of 2 or more games and we need to treat these days one prediction. To achieve this, each game that's played on the same day as the data in all of their columns averaged out. The comments in the code should have more detail.
+
+```{r group_counts}
+# Counts how many games are in each group.
+# A group is a set of games that either are being played or can be played on the same day.
+# For example, if there's a bid war between Ocarina of Time and Majora's Mask,
+# they would share the same grouping for that entry.
+counts <- past_results %>%
+  group_by(grouping) %>%
+  count(grouping)
+
+# Splits games with multiple categories and assigns weights to each entry depending
+# on their grouping. All of the joins should go here.
+past_results_pivoted <- past_results %>%
+  left_join(counts, by = join_by(grouping)) %>%
+  mutate(weight = 1/n) %>%
+  select(-n) %>%
+  left_join(game_list, by = join_by(game)) %>%
+  left_join(cumulative_playtime, by = join_by(game_id), multiple = "all", relationship = "many-to-many") %>%
+  dummy_cols(select_columns = c("category"),
+             remove_selected_columns = T,
+             split = ",") %>%
+  pivot_wider(names_from = streamer, values_from = minutes, values_fill = 0,
+              names_glue = "cum_playtime_{streamer}") %>%
+  left_join(past_results_pivoted_metadata, by = join_by(MOMAM, grouping, game, winner, game_id))
+
+
+# Sets the data up to be weighted. Will lose game id with this, so need to have all the data
+# ready to go by this point.
+past_results_weighted <- past_results_pivoted %>%
+  pivot_longer(cols = c(starts_with("category"), starts_with("cum"),
+                        starts_with("first"), starts_with("franchise"),
+                        starts_with("genre"), starts_with("involved"),
+                        starts_with("platform"), starts_with("player"),
+                        starts_with("theme"), starts_with("total")), # Brings all of the columns together
+               names_to = "placeholder") %>%                        # that need to be weighted.
+  mutate(weighted_val = value * weight) %>% # Applies the weight
+  group_by(MOMAM, grouping, winner, placeholder) %>%
+  summarise(weighted_group = sum(weighted_val)) %>%
+  pivot_wider(names_from = placeholder, values_from = weighted_group, values_fill = 0) # Puts the data back in their dummy column
+```
+
+```{r check_head}
+head(past_results_weighted)
+```
+
+```{r check_dim}
+dim(past_results_weighted)
+```
+
+## Step 4: Analysis
+
+Now that the data has been created, it's time to analyze it.
+
+First up, a preprocessing workflow is created.
+Since we have so many columns - many of which have near-zero variance, we will
+filter those out.
+
+```{r pre=process}
+past_results_weighted$winner <- as.factor(past_results_weighted$winner)
+
+data_recipe <- recipe(winner ~ ., data = past_results_weighted) %>%
+  step_rm(grouping) %>%
+  step_nzv(all_predictors(), freq_cut = 0.01, unique_cut = 0) %>%
+  step_zv(all_predictors()) %>%
+  step_lincomb(all_numeric_predictors()) %>%
+  step_mutate(cum_playtime_pie = log(cum_playtime_pie + 1)) %>%
+  step_mutate(cum_playtime_pie= log(cum_playtime_spike + 1)) %>%
+  step_naomit(c(cum_playtime_pie, cum_playtime_spike)) %>%
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors(), threshold = 0.2)
+  #step_pca(starts_with("category_"), threshold = 0.8)
+```
+
+Next for the train-test split. Rather than spliting the data randomly, it was split
+where last year's results are the test set and years 1-6 are the training data.
+The idea here is that the most recent year is the most important one to get correct.
+
+```{r train_test}
+# All past MOMAMs will be the training data, with the goal of predicting the most
+# recent one.
+data_train <- past_results_weighted[which(pivoted_data$MOMAM != 7), ]
+data_test <- past_results_weighted[which(pivoted_data$MOMAM == 7), ]
+```
+
+Applies the pre-processing steps to our test and train data as defined above.
+```{r apply_preprocessing}
+data_processed <- prep(data_recipe, training = data_train, retain = TRUE) %>%
+  bake(new_data = data_test)
+
+View(data_processed)
+```
+
+Define models:
+
+These are the models is trained on. Currently a few simple models are here as a baseline,
+but ideally more will be used.
+
+```{r models}
+model_dt <- decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+model_lr <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+```
+
+```{r workflow}
+workflow_set <- workflow_set(
+  preproc = list(simple = data_recipe),
+  models = list(
+    decision_tree = model_dt,
+    logistic_regression = model_lr
+  ),
+  cross = TRUE
+)
+```
+
+```{r train}
+set.seed(0323)
+trained_workflow_set <- workflow_map(
+  workflow_set,
+  "fit_resamples",
+  resamples = vfold_cv(data_train),
+  metrics = metric_set(accuracy),
+  control = control_resamples(save_pred = TRUE)
+)
+```
+
+```{r evaluate}
+trained_workflow_set
+
+autoplot(trained_workflow_set)
+```
