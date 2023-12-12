@@ -4,7 +4,7 @@
 
 `Run_MOMAM_abridged.Rmd` removes the API calls, does not build `MOMAM.sqlite` from scratch, and trains only a small subset of models. This should take approximately ~5 minutes to run.
 
-Both of these notebooks utilize parallel processing to train models more efficiently. They are hard-coded to use 10 CPU cores. If attempting to reproduce on a machine does not meet that requirement, either modify the `train` cell where `doParallel::registerDoParallel(cores = 10)` is set, or try again on a machine with more CPU cores.
+Both of these notebooks utilize parallel processing to train models more efficiently. They are hard-coded to use 10 CPU cores. If attempting to reproduce on a machine does not meet that requirement, either modify the `train` cell where `doParallel::registerDoParallel(cores = 10)` is set, or try again on a machine with more CPU cores. Also note that when attempting to `knit` `doParallel` that uses multiple cores, a Windows Firewall popup can occur on Windows. If one does not feel safe with this, removing the parallel processing code would be sufficient, although training time would increase significantly.
 
 # Models and Preprocessing Techniques
 
