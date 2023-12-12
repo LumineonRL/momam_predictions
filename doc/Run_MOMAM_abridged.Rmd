@@ -1,9 +1,12 @@
 ---
-title: "Run MOMAM"
+title: "Run MOMAM - short ver."
 author: "Michael Wiley"
 date: "2023-12-03"
 output: pdf_document
 ---
+
+## The short version removes the data extraction and database building steps (~10 mins)
+## as well as greatly reducing the number of models trained (~1 hour saved)
 
 ## Step 0: Setup
 
@@ -27,8 +30,6 @@ library(fastDummies)
 library(yardstick)
 library(discrim)
 library(sda)
-library(agua)
-library(rules)
 library(finetune)
 library(doParallel)
 tidymodels_prefer()
@@ -49,6 +50,7 @@ Load all csv files
 Creates tables name
 Loads API information
 ```{r gloabl_var_setup}
+#db <- dbConnect(SQLite(), str_c(here("output"), "/", "MOMAM.sqlite"))
 db <- connect_db(here("output"), "MOMAM.sqlite")
 csvs <- load_all_csvs_from_folder(here("data/channel_data/"))
 
@@ -76,108 +78,6 @@ access_token <- get_access_token()
 
 ```
 
-## Step 1: Obtain Data
-**WARNING: This cell can take ~10 minutes to run.**
-**You can skip Step 1 entirely and move straight to Step 2 if you are not attempting to**
-**recreate the `output/MOMAM.sqlite` database from scratch.**
-
-- Loads in the annual play time data for each game each streamer has played each year
-- Searches the game in vgdb to obtain the game's id number to use to later obtain metadata on each game
-- Writes the data to the database.
-
-- Please refer to the functions in `lib/twitch_game_and_channel_data` for further documenation.
-
-One *only* needs to run this cell if trying to reproduce `output/MOMAM.sqlite` from scratch.
-Running it with an existing `MOMAM.sqlite` files with no new csvs in `data/channel_data/` will
-attempt to merge the exact same data into the same tables in the db but end up doing nothing because
-the data already exists.
-
-*In other words* if this cell is taking too long to run, simply skip it and everything else
-will run fine provided the above paragraph is true.
-```{r process_csvs}
-lapply(csvs, function(csv) {
-  construct_yearly_time(db, csv)
-})
-
-dbExecute(db, "DROP VIEW IF EXISTS cumulative_playtime;")
-dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_playtime AS
-           SELECT streamer, game_id, SUM(minutes) AS minutes
-           FROM yearly_playtime
-           GROUP BY streamer, game_id;")
-```
-
-```{r db_check}
-dbGetQuery(db, "SELECT * FROM cumulative_playtime;")
-```
-
-The csv files contained data on every game the two streamers have played between 2016 and 2022
-and we took all of those games, and added an entry in our database for them.
-
-However, what about games they haven't played? Every year MOMAM features games that neither
-participant has played before and is thus not in the csvs with their past data.
-
-The below manually adds entries for games that will be played in an upcoming MOMAM
-so that their metadata can be collected as well.
-```{r manual_additions}
-manual_db_additions(db)
-```
-
-The following function will:
-1) Take every game pie and spike have ever streamed and construct a query that
-will grab any potentially useful meta data from that query
-2) Send the query to the API
-3) Parse and normalize the result of the query
-4) Write the query to the MOMAM database.
-
-Please view `lib/get_game_metadata.R` for more detailed documentation.
-
-```{r collect_metadata}
-games_run_query(db)
-```
-
-Creates aggregate views of the data in order to know how much time each streamer has spent
-playing games with a certain piece of metadata.
-
-- `imputed_yearly_metadata` is an intermediary table used to remove null values when calculating
-play time for the next two view
-- `yearly_metadata_playtime` lists how long each streamer spent playing games with particular
-metadata each year.
-- `cumulative_metadata_playtime` lists how long each streamer played games with particular metadata
-throughout their streaming career.
-
-The yearly data is actually very important. Imagine if streamer A has 100 total hours on games in the
-`action` genre, but 95 of those hours were in 2022. Since our model will be learning from past MOMAMs
-that have been happening since 2016, it's important to have the context of what their experience with the
-genre was *at the time* and not necessarily what their current, cumulative experience with it is.
-```{r create_views}
-# I wish SQLite had 'CREATE OR REPLACE' statements.
-dbExecute(db, "DROP VIEW IF EXISTS imputed_yearly_metadata;")
-dbExecute(db, "DROP VIEW IF EXISTS yearly_metadata_playtime;")
-dbExecute(db, "DROP VIEW IF EXISTS cumulative_metadata_playtime;")
-
-# Some games don't have a release date or rating in vgdb, so this view imputes one from the average.
-dbExecute(db, "CREATE VIEW IF NOT EXISTS imputed_yearly_metadata AS
-            SELECT DISTINCT id, name,
-            ROUND(COALESCE(value, AVG(value) OVER(PARTITION BY name)), 0) value
-            FROM games_metadata")
-
-
-dbExecute(db, "CREATE VIEW IF NOT EXISTS yearly_metadata_playtime AS
-           SELECT y.streamer, y.year, g.name, g.value, SUM(y.minutes) minutes
-           FROM yearly_playtime y
-           LEFT JOIN imputed_yearly_metadata g ON y.game_id = g.id
-           GROUP BY y.streamer, y.year, g.name, g.value")
-
-
-dbExecute(db, "CREATE VIEW IF NOT EXISTS cumulative_metadata_playtime AS
-           SELECT streamer, name, value, SUM(minutes) minutes
-           FROM yearly_metadata_playtime
-           GROUP BY streamer, name, value;")
-```
-```{r db_disconnect}
-dbDisconnect(db)
-```
-
 
 ## Step 2: Prepare Data for Analysis
 
@@ -193,7 +93,7 @@ cumulative_playtime is our list of how long each streamer spent playing each gam
 imputed_yearly_metadata lists pertinent metadata for each game, such as genre and release data.
 
 ```{r setup}
-db <- connect_db(here("output"), "MOMAM.sqlite")
+#db <- connect_db(here("output"), "MOMAM.sqlite")
 past_results <- read_csv(str_c(here("data/momam7"), "/momam7_base_data.csv"))
 
 game_list <- dbGetQuery(db, 'SELECT game_id, game FROM game_data;') %>%
@@ -361,28 +261,8 @@ hierarchical_pca <- grouped_pca %>%
   step_pca(-c("MOMAM", "first_release_date", "total_rating", "winner"),
            threshold = 0.8, prefix = "hier_")
 
-pca_recipe <- base_recipe %>%
-  step_pca(all_predictors(), threshold = 0.2)
-
 pca_strict_recipe <- base_recipe %>%
   step_pca(all_predictors(), threshold = 0.8)
-
-pca_very_strict_recipe <- base_recipe %>%
-  step_pca(all_predictors(), threshold = 0.95)
-
-kpca_poly_recipe <- base_recipe %>%
-  step_kpca_poly(all_predictors(), num_comp = 10)
-
-modified_base <- recipe(winner ~ ., data = momam_train) %>%
-  step_rm(grouping) %>%
-  step_mutate(cum_playtime_pie = log(cum_playtime_pie + 1)) %>%
-  step_mutate(cum_playtime_spike = log(cum_playtime_spike + 1)) %>%
-  step_zv(all_predictors()) %>%
-  step_nzv(all_predictors(), freq_cut = 0.05, unique_cut = 0.01) %>%
-  step_corr(all_predictors()) %>%
-  step_lincomb(all_numeric_predictors()) %>%
-  step_center(all_predictors()) %>%
-  step_scale(all_predictors())
   
 ```
 
@@ -398,24 +278,9 @@ model_dt <- decision_tree(tree_depth = tune(), min_n = tune(), cost_complexity =
   set_mode("classification") %>%
   translate()
 
-model_lr <- logistic_reg() %>%
-  set_engine("glm") %>%
-  set_mode("classification")
-
-model_lda <- discrim_linear() %>% 
-  set_engine("sda") %>% 
-  translate()
-
-model_linear_mda <- discrim_linear(penalty = tune()) %>%
-  set_engine("mda")
-
 model_rf <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
   set_engine("randomForest") %>% 
   set_mode("classification") %>% 
-  translate()
-
-model_nb <- naive_Bayes(smoothness = tune(), Laplace = tune()) %>%
-  set_engine("naivebayes") %>% 
   translate()
 
 model_xgb <- boost_tree(tree_depth = tune(),
@@ -429,23 +294,6 @@ model_xgb <- boost_tree(tree_depth = tune(),
   set_engine("xgboost") %>%
   set_mode("classification") %>%
   translate()
-
-model_c5_rules <- C5_rules(trees = tune(), min_n = tune()) %>%
-  set_engine("C5.0") %>%
-  set_mode("classification") %>%
-  translate()
-
-model_neighbor <- nearest_neighbor(neighbors = tune(), weight_func = tune(), dist_power = tune()) %>%
-  set_engine("kknn") %>% 
-  set_mode("classification")
-
-model_mlp <- mlp(
-  hidden_units = tune(),
-  penalty = tune(),
-  epochs = tune()
-) %>%  
-  set_engine("nnet") %>% 
-  set_mode("classification")
 ```
 
 List of models to train. Each model will be trained with each preprocessing technique.
@@ -453,24 +301,12 @@ List of models to train. Each model will be trained with each preprocessing tech
 ```{r workflow}
 momam_workflowset <- workflow_set(
   preproc = list(base = base_recipe,
-                 pca = pca_recipe,
                  strict = pca_strict_recipe,
-                 very_strict = pca_very_strict_recipe,
-                 kpca = kpca_poly_recipe,
-                 modified = modified_base,
-                 grouped_pca = grouped_pca,
                  hierarchical_pca = hierarchical_pca),
   models = list(
     decision_tree = model_dt,
-    logistic_regression = model_lr,
-    discrim_linear = model_lda,
-    linear_mda = model_linear_mda,
     rand_forest = model_rf,
-    naive_bayes = model_nb,
-    xgboost = model_xgb,
-    C5_Rules = model_c5_rules,
-    nearest_neighbor = model_neighbor,
-    mlp = model_mlp
+    xgboost = model_xgb
   ),
   cross = TRUE
 )
@@ -486,6 +322,7 @@ race_ctrl <-
     save_workflow = TRUE
   )
 
+library(doParallel)
 doParallel::registerDoParallel(cores = 10)
 
 grid_results <-
@@ -501,6 +338,7 @@ grid_results <-
 
 doParallel::stopImplicitCluster()
 ```
+
 Displays how the models performed.
 Accuracy was chosen as the metric since we care more about predicting the winner
 correctly by any means necessary moreso than which predictions the model is
@@ -514,6 +352,7 @@ autoplot(
   select_best = TRUE     # <- one point per workflow
 )
 ```
+
 Ranks each of the trained models.
 
 ```{r model_rankings}
